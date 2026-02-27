@@ -1,0 +1,257 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PVT-5</title>
+  <style>
+    body { font-family: system-ui, Arial; max-width: 720px; margin: 24px auto; padding: 0 16px; }
+    .box { border: 1px solid #ddd; border-radius: 12px; padding: 16px; }
+    button, input { font-size: 16px; padding: 10px 12px; }
+    #stim { height: 180px; display:flex; align-items:center; justify-content:center; border-radius: 12px; border: 1px dashed #bbb; margin-top: 14px;}
+    #dot { width: 70px; height: 70px; border-radius: 999px; background: transparent; }
+    .hidden { display:none; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    #status { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>PVT-5 (5 minutes)</h1>
+
+  <div class="box" id="setup">
+    <p><b>Instructions:</b> When the dot appears, press <b>Space</b> (or tap the box on mobile) as fast as you can. Avoid pressing early.</p>
+    <div class="row">
+      <label>Participant ID:
+        <input id="pid" placeholder="e.g., P01" />
+      </label>
+      <button id="startBtn">Start</button>
+    </div>
+    <p style="margin-top:10px;color:#555;">Tip: do this in a quiet place, on one device, without switching tabs.</p>
+  </div>
+
+  <div class="box hidden" id="test">
+    <div class="row">
+      <div><b>Time left:</b> <span id="timeLeft">300</span>s</div>
+      <div><b>Trials:</b> <span id="trialCount">0</span></div>
+      <div><b>False starts:</b> <span id="falseCount">0</span></div>
+      <div><b>Lapses (&gt;500ms):</b> <span id="lapseCount">0</span></div>
+    </div>
+
+    <div id="stim">
+      <div id="dot"></div>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="box hidden" id="done">
+    <h2>Done ✅</h2>
+    <p>Thank you! You can close this page.</p>
+    <pre id="debug" class="hidden"></pre>
+  </div>
+
+<script>
+  // ====== CONFIG ======
+  const TEST_DURATION_MS = 300000; // 5 minutes
+  const ISI_MIN_MS = 2000;
+  const ISI_MAX_MS = 10000;
+  const LAPSE_MS = 500;
+
+  // Paste your Google Apps Script Web App URL here:
+  const SUBMIT_URL = "https://script.google.com/macros/s/AKfycbw-rxqx7ruFm2h0Nfz6zkILFeAnnvnxuU_M9USzyw_571LCwXp-z7UyIXMPw-_Skq8izw/exec";
+
+  // ====== STATE ======
+  let startTime = null;
+  let endTime = null;
+  let stimulusOn = false;
+  let stimulusTime = null;
+  let trialNumber = 0;
+  let falseStarts = 0;
+  let lapses = 0;
+  let timerInterval = null;
+  let pendingStimTimeout = null;
+  const trials = [];
+
+  const setupDiv = document.getElementById("setup");
+  const testDiv = document.getElementById("test");
+  const doneDiv = document.getElementById("done");
+  const pidInput = document.getElementById("pid");
+  const dot = document.getElementById("dot");
+
+  const timeLeftEl = document.getElementById("timeLeft");
+  const trialCountEl = document.getElementById("trialCount");
+  const falseCountEl = document.getElementById("falseCount");
+  const lapseCountEl = document.getElementById("lapseCount");
+  const statusEl = document.getElementById("status");
+
+  function now() { return performance.now(); }
+  function randInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
+
+  function setDot(on) {
+    dot.style.background = on ? "#e11d48" : "transparent";
+  }
+
+  function updateHUD() {
+    trialCountEl.textContent = trialNumber;
+    falseCountEl.textContent = falseStarts;
+    lapseCountEl.textContent = lapses;
+  }
+
+  function scheduleNextStimulus() {
+    if (now() >= endTime) return;
+    const isi = randInt(ISI_MIN_MS, ISI_MAX_MS);
+    pendingStimTimeout = setTimeout(showStimulus, isi);
+  }
+
+  function showStimulus() {
+    if (now() >= endTime) return;
+    stimulusOn = true;
+    stimulusTime = now();
+    setDot(true);
+    statusEl.textContent = "Respond!";
+  }
+
+  function registerResponse() {
+    const t = now();
+
+    if (!startTime) return; // not started
+    if (t >= endTime) return; // finished
+
+    if (!stimulusOn) {
+      // false start
+      falseStarts++;
+      trials.push({
+        trial_number: trialNumber + 1,
+        stimulus_time: null,
+        response_time: t,
+        reaction_time_ms: null,
+        false_start: 1,
+        lapse: 0
+      });
+      updateHUD();
+      statusEl.textContent = "Too early (false start). Wait for the dot.";
+      return;
+    }
+
+    // valid response
+    const rt = t - stimulusTime;
+    const isLapse = rt > LAPSE_MS ? 1 : 0;
+    trialNumber++;
+    if (isLapse) lapses++;
+
+    trials.push({
+      trial_number: trialNumber,
+      stimulus_time: stimulusTime,
+      response_time: t,
+      reaction_time_ms: Math.round(rt),
+      false_start: 0,
+      lapse: isLapse
+    });
+
+    stimulusOn = false;
+    stimulusTime = null;
+    setDot(false);
+    updateHUD();
+    statusEl.textContent = "Good. Wait…";
+
+    scheduleNextStimulus();
+  }
+
+  function startTest() {
+    const pid = pidInput.value.trim();
+    if (!pid) {
+      alert("Please enter a Participant ID.");
+      return;
+    }
+    if (!SUBMIT_URL.includes("http")) {
+      alert("You must paste your Web App URL into SUBMIT_URL in the code.");
+      return;
+    }
+
+    setupDiv.classList.add("hidden");
+    testDiv.classList.remove("hidden");
+
+    // practice stimulus
+    statusEl.textContent = "Practice: wait for the dot…";
+    startTime = now() + 1200; // small delay
+    endTime = startTime + TEST_DURATION_MS;
+
+    // start countdown display
+    timerInterval = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((endTime - now()) / 1000));
+      timeLeftEl.textContent = remaining;
+      if (remaining <= 0) finishTest();
+    }, 200);
+
+    // first practice stimulus quickly
+    setTimeout(() => {
+      if (now() < endTime) showStimulus();
+      // after first response, normal scheduling resumes
+    }, 1500);
+  }
+
+  async function submitData() {
+    const payload = {
+      participant_id: pidInput.value.trim(),
+      session_timestamp: new Date().toISOString(),
+      device_type: /Mobi|Android/i.test(navigator.userAgent) ? "mobile" : "desktop",
+      browser: navigator.userAgent,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      trials: trials.map(t => ({
+        trial_number: t.trial_number,
+        stimulus_time: t.stimulus_time,
+        response_time: t.response_time,
+        reaction_time_ms: t.reaction_time_ms,
+        false_start: t.false_start,
+        lapse: t.lapse
+      }))
+    };
+
+    // send
+    await fetch(SUBMIT_URL, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async function finishTest() {
+    if (!testDiv.classList.contains("hidden")) {
+      clearInterval(timerInterval);
+      clearTimeout(pendingStimTimeout);
+      stimulusOn = false;
+      setDot(false);
+      statusEl.textContent = "Submitting…";
+
+      try {
+        await submitData();
+        statusEl.textContent = "Submitted.";
+      } catch (e) {
+        statusEl.textContent = "Submission failed. Please screenshot this page and contact the study lead.";
+        // document.getElementById("debug").classList.remove("hidden");
+        // document.getElementById("debug").textContent = JSON.stringify(e, null, 2);
+      }
+
+      testDiv.classList.add("hidden");
+      doneDiv.classList.remove("hidden");
+    }
+  }
+
+  // Events: spacebar + tapping the stimulus box
+  document.getElementById("startBtn").addEventListener("click", startTest);
+  document.getElementById("stim").addEventListener("click", registerResponse);
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Space") {
+      e.preventDefault();
+      registerResponse();
+    }
+  });
+
+  // prevent accidental navigation
+  window.addEventListener("beforeunload", (e) => {
+    if (!setupDiv.classList.contains("hidden") && testDiv.classList.contains("hidden")) return;
+    e.preventDefault();
+    e.returnValue = "";
+  });
+</script>
+</body>
+</html>
